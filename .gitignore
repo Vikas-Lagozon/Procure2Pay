@@ -1,0 +1,7 @@
+venv/
+# .*
+_*
+__*
+*.json
+log/
+venv/
