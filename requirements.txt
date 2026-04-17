@@ -1,0 +1,22 @@
+# requirements.txt
+# ─── Google ADK & GenAI ────────────────────────────────────────
+google-adk>=0.1.0          # Agent Development Kit
+google-genai>=0.3.0        # Generative AI client
+
+# ─── Configuration & Environment ──────────────────────────────
+python-dotenv>=1.0.0       # Load .env variables
+certifi>=2024.2.2          # SSL certificates
+
+# ─── Database & Async Support ─────────────────────────────────
+SQLAlchemy>=2.0.0          # ORM for session service
+asyncpg>=0.29.0            # Async PostgreSQL driver
+psycopg2-binary>=2.9.9     # Optional sync driver (if needed)
+pymongo>=4.6.0             # MongoDB driver (for potential use)
+
+# ─── Google Cloud Services (optional, per config) ─────────────
+google-cloud-storage>=2.14.0
+google-cloud-bigquery>=3.20.0
+google-auth>=2.29.0
+
+# ─── Utilities (implied by logging/async) ─────────────────────
+aiofiles>=23.2.1           # Async file operations (if used later)
