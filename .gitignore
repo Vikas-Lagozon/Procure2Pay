@@ -4,4 +4,6 @@ _*
 __*
 *.json
 logs/
+documents/
 venv/
+
