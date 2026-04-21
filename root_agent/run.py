@@ -8,7 +8,7 @@ import sys
 from chatbot import chat_stream
 
 async def main():
-    session_id = "cli_interactive_session"   # persistent session (history saved in DB)
+    session_id = "cli_interactive_session"
 
     print("🤖 Jarvis is online! Type 'exit' or Ctrl+C to quit.")
     print("=" * 60)
@@ -36,7 +36,7 @@ async def main():
             print("\n\n👋 Goodbye!")
             break
         except Exception as e:
-            print(f"\n❌ Error: {e}")
+            print(f"\nError: {e}")
             break
 
 

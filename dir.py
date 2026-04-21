@@ -26,7 +26,7 @@ def explain_directory(path, indent=""):
 
 if __name__ == "__main__":
     # dir_path = input("Enter the directory path: ").strip()
-    dir_path = r"D:\Procure2Pay\Implementation\Procure2Pay"
+    dir_path = r"D:\Procure2Pay\Implementation\Procure2Pay\root_agent"
     print(f"Directory tree for: {dir_path}\n")
     explain_directory(dir_path)
 

@@ -8,17 +8,17 @@ class Config:
     # ── Models ────────────────────────────────────────────────
     MODEL: str = os.getenv("MODEL", "gemini-2.5-flash")
     
-    # -----------------------------
+    # ─────────────────────────────────────────────────────────────
     # Gemini (API Key Mode)
-    # -----------------------------
+    # ─────────────────────────────────────────────────────────────
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
     if not GOOGLE_API_KEY:
         raise ValueError("GOOGLE_API_KEY is required.")
 
-    # -----------------------------
+    # ─────────────────────────────────────────────────────────────
     # GCS Artifact Service
-    # -----------------------------
+    # ─────────────────────────────────────────────────────────────
     GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
     GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     BUCKET_NAME = os.getenv("BUCKET_NAME")
@@ -32,16 +32,16 @@ class Config:
     # Set credentials for GCS
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_APPLICATION_CREDENTIALS
 
-    # -----------------------------
+    # ─────────────────────────────────────────────────────────────
     # BigQuery
-    # -----------------------------
+    # ─────────────────────────────────────────────────────────────
     BQ_PROJECT_ID = os.getenv("BQ_PROJECT_ID")
     BQ_DATASET = os.getenv("BQ_DATASET")
     SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
 
-    # -----------------------------
+    # ─────────────────────────────────────────────────────────────
     # MongoDB Configuration
-    # -----------------------------
+    # ─────────────────────────────────────────────────────────────
     MONGO_URI: str = os.getenv("MONGO_URI", "mongodb://localhost:27017")
     MONGO_DB: str = os.getenv("MONGO_DB", "procure2pay_db")
 
@@ -52,9 +52,9 @@ class Config:
     if MONGO_USER and MONGO_PASSWORD:
         MONGO_URI = f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@localhost:27017"
 
-    # -----------------------------
+    # ─────────────────────────────────────────────────────────────
     # PostgreSQL Configuration
-    # -----------------------------
+    # ─────────────────────────────────────────────────────────────
     PG_USER: str = os.getenv("PG_USER", "procure2pay")
     PG_PASSWORD: str = os.getenv("PG_PASSWORD", "abcd1234")
     PG_HOST: str = os.getenv("PG_HOST", "localhost")
