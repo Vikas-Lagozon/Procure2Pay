@@ -1,7 +1,4 @@
 # subagent.py
-# Reusable subagent logic — intent parsing, email validation,
-# thread tracking, attachment management, and knowledge base loading.
-# Designed to be imported by agent.py and any future agents.
 
 from __future__ import annotations
 
@@ -52,6 +49,7 @@ class IntentParser:
         "get_thread",
         "download_attachments",
         "attach_files",
+        "list_contacts",
     }
 
     def parse(self, user_instruction: str) -> dict[str, Any]:
@@ -108,6 +106,9 @@ class IntentParser:
             "query":       "is:unread",
             "max_results": config.EMAIL_FETCH_MAX_RESULTS,
             "download_dir": "",
+            "cc_domain": "",
+            "semantic_filter": "",
+            "contacts_query": "",
         }
         for key, default in defaults.items():
             if key not in intent or intent[key] is None:

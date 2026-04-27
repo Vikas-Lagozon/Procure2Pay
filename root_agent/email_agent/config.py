@@ -60,6 +60,7 @@ class Config:
     # Google People API scope (for list_contacts tool)
     CONTACTS_SCOPES: list[str] = [
         "https://www.googleapis.com/auth/contacts.readonly",
+        "https://www.googleapis.com/auth/contacts.other.readonly",
     ]
 
     # Combined OAuth2 scopes used for the single shared token file.

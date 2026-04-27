@@ -1177,7 +1177,7 @@ def attach_files(file_paths: list[str]) -> dict:
 
 
 # ═════════════════════════════════════════════════════════════
-# TOOL 7 — list_contacts  (NEW)
+# TOOL 7 — list_contacts
 # ═════════════════════════════════════════════════════════════
 
 def list_contacts(
@@ -1187,9 +1187,9 @@ def list_contacts(
     """
     List known email addresses from Google Contacts (People API).
 
-    Returns all contacts that have at least one email address.
-    Use this tool when the user asks for available/known email addresses,
-    wants to look up a contact's email, or asks who is in their contacts.
+    Searches both "My Contacts" (explicit saves) and "Other Contacts"
+    (auto-saved from email history). Returns all contacts that have at
+    least one email address.
 
     Args:
         query: Optional search string to filter contacts by name or email
@@ -1200,7 +1200,7 @@ def list_contacts(
         dict with keys:
           - success (bool)
           - contacts (list) — each entry has: name (str), emails (list[str]),
-            phones (list[str])
+            phones (list[str]), source (str: 'contacts' | 'other_contacts')
           - total (int)
           - error (str)
     """
@@ -1209,69 +1209,117 @@ def list_contacts(
 
     try:
         service = _auth_manager.get_people_service()
-
-        # Fetch contacts in pages (People API max page size = 1000)
-        connections: list[dict] = []
-        next_page_token: str    = ""
-
-        while True:
-            kwargs: dict = {
-                "resourceName": "people/me",
-                "pageSize":     min(max_results, 1000),
-                "personFields": "names,emailAddresses,phoneNumbers",
-            }
-            if next_page_token:
-                kwargs["pageToken"] = next_page_token
-
-            def _list_page(kw=kwargs):
-                return service.people().connections().list(**kw).execute()
-
-            response        = _retry(_list_page)
-            page_contacts   = response.get("connections", [])
-            connections.extend(page_contacts)
-
-            next_page_token = response.get("nextPageToken", "")
-            if not next_page_token or len(connections) >= max_results:
-                break
-
-        # ── Parse and optionally filter ───────────────────────
-        contacts: list[dict] = []
         q_lower = query.lower() if query else ""
 
-        for person in connections:
-            if len(contacts) >= max_results:
-                break
-
-            names   = person.get("names", [])
-            emails  = person.get("emailAddresses", [])
-            phones  = person.get("phoneNumbers", [])
+        # ── Helper: parse a People API person record ──────────
+        def _parse_person(person: dict, source: str) -> dict | None:
+            names  = person.get("names", [])
+            emails = person.get("emailAddresses", [])
+            phones = person.get("phoneNumbers", [])
 
             if not emails:
-                continue   # skip contacts with no email
+                return None
 
             name   = names[0].get("displayName", "") if names else ""
             e_list = [e["value"] for e in emails if e.get("value")]
             p_list = [p["value"] for p in phones if p.get("value")]
 
+            if not e_list:
+                return None
+
             if q_lower:
                 name_match  = q_lower in name.lower()
                 email_match = any(q_lower in e.lower() for e in e_list)
                 if not name_match and not email_match:
-                    continue
+                    return None
 
-            contacts.append({"name": name, "emails": e_list, "phones": p_list})
+            return {"name": name, "emails": e_list, "phones": p_list, "source": source}
 
-            # Persist to MongoDB contacts collection (upsert by first email)
-            if e_list:
+        contacts: list[dict] = []
+        seen_emails: set[str] = set()   # dedup across both sources
+
+        # ── SOURCE 1: "My Contacts" (people.connections) ──────
+        try:
+            next_page_token = ""
+            while len(contacts) < max_results:
+                kwargs: dict = {
+                    "resourceName": "people/me",
+                    "pageSize":     min(max_results, 1000),
+                    "personFields": "names,emailAddresses,phoneNumbers",
+                }
+                if next_page_token:
+                    kwargs["pageToken"] = next_page_token
+
+                def _list_connections(kw=kwargs):
+                    return service.people().connections().list(**kw).execute()
+
+                response      = _retry(_list_connections)
+                page_contacts = response.get("connections", [])
+
+                for person in page_contacts:
+                    if len(contacts) >= max_results:
+                        break
+                    parsed = _parse_person(person, "contacts")
+                    if parsed:
+                        primary = parsed["emails"][0].lower()
+                        if primary not in seen_emails:
+                            seen_emails.add(primary)
+                            contacts.append(parsed)
+
+                next_page_token = response.get("nextPageToken", "")
+                if not next_page_token:
+                    break
+
+        except Exception as exc:
+            logger.warning(f"[list_contacts] connections.list failed: {exc}")
+
+        # ── SOURCE 2: "Other Contacts" (otherContacts) ────────
+        try:
+            next_page_token = ""
+            while len(contacts) < max_results:
+                kwargs2: dict = {
+                    "pageSize":     min(max_results, 1000),
+                    "readMask":     "names,emailAddresses,phoneNumbers",
+                }
+                if next_page_token:
+                    kwargs2["pageToken"] = next_page_token
+
+                def _list_other(kw=kwargs2):
+                    return service.otherContacts().list(**kw).execute()
+
+                response      = _retry(_list_other)
+                page_contacts = response.get("otherContacts", [])
+
+                for person in page_contacts:
+                    if len(contacts) >= max_results:
+                        break
+                    parsed = _parse_person(person, "other_contacts")
+                    if parsed:
+                        primary = parsed["emails"][0].lower()
+                        if primary not in seen_emails:   # dedup
+                            seen_emails.add(primary)
+                            contacts.append(parsed)
+
+                next_page_token = response.get("nextPageToken", "")
+                if not next_page_token:
+                    break
+
+        except Exception as exc:
+            logger.warning(f"[list_contacts] otherContacts.list failed: {exc}")
+
+        # ── Persist to MongoDB (upsert by primary email) ──────
+        for contact in contacts:
+            if contact["emails"]:
                 try:
                     _contacts_col.update_one(
-                        {"email": e_list[0]},
+                        {"email": contact["emails"][0]},
                         {
                             "$set": {
-                                "email":      e_list[0],
-                                "all_emails": e_list,
-                                "name":       name,
-                                "phones":     p_list,
+                                "email":      contact["emails"][0],
+                                "all_emails": contact["emails"],
+                                "name":       contact["name"],
+                                "phones":     contact["phones"],
+                                "source":     contact["source"],
                                 "synced_at":  datetime.utcnow().isoformat(),
                             }
                         },
@@ -1291,7 +1339,6 @@ def list_contacts(
     except HttpError as exc:
         logger.error(f"[list_contacts] People API error: {exc}")
         return {"success": False, "contacts": [], "total": 0, "error": str(exc)}
-
 
 # ═════════════════════════════════════════════════════════════
 # TOOLS REGISTRY  (exported list for agent registration)
