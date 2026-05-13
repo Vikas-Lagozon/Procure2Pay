@@ -4,11 +4,6 @@ RequirementsChatbot — fully natural-language-driven CRUD + Q&A agent.
 
 Intent detection is handled here via an LlmAgent call — no separate
 intent.py file is needed.
-
-Routing priority:
-  1. /exit, /help  — handled immediately in run.py (never reach here)
-  2. Bare file path typed directly  → upload
-  3. Everything else  → LLM detects intent  → route to handler in tools.py
 """
 
 import sys
@@ -32,7 +27,7 @@ from google.adk.apps import App
 
 from requirements_agent.config import config
 from requirements_agent.utils import is_file_path, extract_file_path
-from requirements_agent.prompts import HELP_TEXT, intent_prompt
+from requirements_agent.prompts import intent_prompt
 from requirements_agent.tools import (
     text_event,
     handle_upload,
@@ -41,7 +36,6 @@ from requirements_agent.tools import (
     handle_delete,
     handle_update,
     handle_question,
-    _load_session_docs,
 )
 from requirements_agent.logger import get_logger
 
@@ -51,17 +45,19 @@ MODEL = config.MODEL
 
 
 # ─────────────────────────────────────────────────────────────
-# INTENT DETECTION  (lives here — no separate intent.py)
+# INTENT DETECTION
 # ─────────────────────────────────────────────────────────────
 
 async def _detect_intent(
     ctx: InvocationContext,
     user_input: str,
-    documents: dict,
 ) -> dict:
     """
     Call a small LlmAgent to classify user_input and extract parameters.
     Always returns a valid dict — never raises.
+
+    Documents context is NOT loaded from session state — the agent is
+    stateless.  Intent detection works on the raw user message alone.
 
     Returns e.g.:
       {"intent": "delete", "params": {"record_ids": "all"}}
@@ -71,7 +67,8 @@ async def _detect_intent(
     agent = LlmAgent(
         name="intent_detector",
         model=MODEL,
-        instruction=intent_prompt(user_input, documents),
+        # Pass an empty documents dict — no session state dependency
+        instruction=intent_prompt(user_input, {}),
     )
 
     raw = ""
@@ -141,9 +138,8 @@ class RequirementsChatbot(BaseAgent):
                 yield ev
             return
 
-        # ── Detect intent via LLM ─────────────────────────────
-        documents = _load_session_docs(ctx)
-        intent    = await _detect_intent(ctx, user_input, documents)
+        # ── Detect intent via LLM (stateless — no session docs) ──
+        intent = await _detect_intent(ctx, user_input)
 
         action = intent.get("intent", "query")
         params = intent.get("params", {})
@@ -152,7 +148,6 @@ class RequirementsChatbot(BaseAgent):
 
         if action == "upload":
             file_path = params.get("file_path", "").strip()
-            # If LLM missed it, try extracting directly from the message
             if not file_path:
                 file_path = extract_file_path(user_input) or ""
             if not file_path:

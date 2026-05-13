@@ -21,10 +21,10 @@ for _p in (_AGENT_DIR, _ROOT_DIR):
 
 import google.genai as genai
 
-from .config import config
-from .logger import get_logger
-from .nosql_db import MongoCollection
-from .prompts import INTENT_EXTRACTION_PROMPT, EMAIL_BODY_GENERATION_PROMPT
+from email_agent.config import config
+from email_agent.logger import get_logger
+from email_agent.nosql_db import MongoCollection
+from email_agent.prompts import INTENT_EXTRACTION_PROMPT, EMAIL_BODY_GENERATION_PROMPT
 
 logger = get_logger(__name__)
 

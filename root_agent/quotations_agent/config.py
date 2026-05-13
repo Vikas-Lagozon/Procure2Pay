@@ -40,13 +40,6 @@ class Config:
     SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
 
     # ─────────────────────────────────────────────────────────────
-    # ── Collection name constants (override via env if needed) ───
-    # ─────────────────────────────────────────────────────────────
-    REQUIREMENTS_COLLECTION = os.getenv("REQUIREMENTS_COLLECTION", "requirements")
-    VENDORS_COLLECTION      = os.getenv("VENDORS_COLLECTION",      "vendors")
-    QUOTATIONS_COLLECTION   = os.getenv("QUOTATIONS_COLLECTION",   "quotations")
-
-    # ─────────────────────────────────────────────────────────────
     # MongoDB Configuration
     # ─────────────────────────────────────────────────────────────
     MONGO_URI: str = os.getenv("MONGO_URI", "mongodb://localhost:27017")

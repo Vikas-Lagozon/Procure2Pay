@@ -1,6 +1,6 @@
-# vendors_agent/agent.py
+# quotation_agent/agent.py
 """
-VendorsChatbot: a Google ADK BaseAgent that routes incoming user messages
+QuotationChatbot: a Google ADK BaseAgent that routes incoming user messages
 to the correct business-logic handler in tools.py.
 
 Intent understanding lives here (no separate intent.py / classifier.py).
@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 # ── Ensure both the agent dir and root dir are on sys.path ──────────────────
-_AGENT_DIR = Path(__file__).resolve().parent   # vendors_agent/
-_ROOT_DIR  = _AGENT_DIR.parent                 # root_agent/
+_AGENT_DIR = Path(__file__).resolve().parent   # quotation_agent/
+_ROOT_DIR  = _AGENT_DIR.parent                 # project root
 for _p in (_AGENT_DIR, _ROOT_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
@@ -31,10 +31,10 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.apps import App
 from google.adk.events import Event
 
-from vendors_agent.config import config
-from vendors_agent.logger import get_logger
-from vendors_agent.prompts import HELP_TEXT, intent_prompt
-from vendors_agent.tools import (
+from quotations_agent.config import config
+from quotations_agent.logger import get_logger
+from quotations_agent.prompts import HELP_TEXT, intent_prompt
+from quotations_agent.tools import (
     handle_delete,
     handle_get,
     handle_list,
@@ -43,7 +43,7 @@ from vendors_agent.tools import (
     handle_upload,
     make_text_event,
 )
-from vendors_agent.utils import extract_file_path, is_file_path, parse_command
+from quotations_agent.utils import extract_file_path, is_file_path, parse_command
 
 logger = get_logger(__name__)
 MODEL  = config.MODEL
@@ -66,11 +66,11 @@ async def _detect_intent(
 
     Example return values:
       {"intent": "delete", "params": {"record_ids": "all"}}
-      {"intent": "upload", "params": {"file_path": "docs/vendor.docx"}}
+      {"intent": "upload", "params": {"file_path": "docs/q3_quotation.pdf"}}
       {"intent": "query",  "params": {"question": "..."}}
     """
     agent = LlmAgent(
-        name="intent_detector",
+        name="quotation_intent_detector",
         model=MODEL,
         # Pass an empty documents dict — no session state dependency
         instruction=intent_prompt(user_input, {}),
@@ -107,34 +107,34 @@ def _parse_intent_response(raw: str, original_input: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
-# VENDORS CHATBOT AGENT
+# QUOTATION CHATBOT AGENT
 # ─────────────────────────────────────────────────────────────
 
-class VendorsChatbot(BaseAgent):
+class QuotationChatbot(BaseAgent):
     """
-    Natural-language → Vendor Management System.
+    Natural-language → Quotation Management System.
 
     Accepts both slash commands and conversational English to manage
-    vendor documents stored in MongoDB and on the local filesystem.
+    quotation documents stored in MongoDB and on the local filesystem.
 
-    Slash command shortcuts (all suffixed with _vendor)
-    ────────────────────────────────────────────────────
-    /upload_vendor <file_path>
-    /list_vendor
-    /get_vendor <record_id>
-    /delete_vendor <record_id>
-    /update_vendor <record_id> <new_file_path>
-    /help_vendor
+    Slash command shortcuts (all suffixed with _quotation)
+    ──────────────────────────────────────────────────────
+    /upload_quotation <file_path>
+    /list_quotation
+    /get_quotation <record_id>
+    /delete_quotation <record_id>
+    /update_quotation <record_id> <new_file_path>
+    /help_quotation
 
     Natural language is the primary interface for all operations.
     """
 
     def __init__(self) -> None:
         super().__init__(
-            name="vendors_chatbot",
+            name="quotation_chatbot",
             description=(
-                "Natural language vendor management — upload, list, get, "
-                "delete, update vendor documents and ask questions about them."
+                "Natural language quotation management — upload, list, get, "
+                "delete, update quotation documents and ask questions about them."
             ),
         )
 
@@ -142,7 +142,7 @@ class VendorsChatbot(BaseAgent):
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
 
-        logger.info("[agent] VendorsChatbot invoked")
+        logger.info("[agent] QuotationChatbot invoked")
 
         # ── Collect user input ──────────────────────────────
         user_input = ""
@@ -191,41 +191,41 @@ class VendorsChatbot(BaseAgent):
         user_input: str,
     ) -> AsyncGenerator[Event, None]:
 
-        if cmd in ("/upload_vendor", "/upload"):
+        if cmd in ("/upload_quotation", "/upload"):
             file_path = " ".join(args).strip() if args else ""
             if not file_path:
                 yield make_text_event(
                     self.name,
-                    "Usage: /upload_vendor <file_path>\n"
+                    "Usage: /upload_quotation <file_path>\n"
                     "Supported formats: .docx, .pdf, .txt, .md",
                 )
             else:
                 async for ev in handle_upload(ctx, file_path, self.name):
                     yield ev
 
-        elif cmd in ("/list_vendor", "/list"):
+        elif cmd in ("/list_quotation", "/list"):
             async for ev in handle_list(ctx, self.name):
                 yield ev
 
-        elif cmd in ("/get_vendor", "/get"):
+        elif cmd in ("/get_quotation", "/get"):
             if not args:
-                yield make_text_event(self.name, "Usage: /get_vendor <record_id>")
+                yield make_text_event(self.name, "Usage: /get_quotation <record_id>")
             else:
                 async for ev in handle_get(ctx, [args[0].strip()], self.name):
                     yield ev
 
-        elif cmd in ("/delete_vendor", "/delete"):
+        elif cmd in ("/delete_quotation", "/delete"):
             if not args:
-                yield make_text_event(self.name, "Usage: /delete_vendor <record_id>")
+                yield make_text_event(self.name, "Usage: /delete_quotation <record_id>")
             else:
                 async for ev in handle_delete(ctx, [args[0].strip()], self.name):
                     yield ev
 
-        elif cmd in ("/update_vendor", "/update"):
+        elif cmd in ("/update_quotation", "/update"):
             if len(args) < 2:
                 yield make_text_event(
                     self.name,
-                    "Usage: /update_vendor <record_id> <new_file_path>",
+                    "Usage: /update_quotation <record_id> <new_file_path>",
                 )
             else:
                 async for ev in handle_update(
@@ -233,14 +233,14 @@ class VendorsChatbot(BaseAgent):
                 ):
                     yield ev
 
-        elif cmd in ("/help_vendor", "/help"):
+        elif cmd in ("/help_quotation", "/help"):
             yield make_text_event(self.name, HELP_TEXT)
 
         else:
             yield make_text_event(
                 self.name,
                 f"Unknown command: {cmd}\n"
-                "Type /help_vendor to see all available commands.",
+                "Type /help_quotation to see all available commands.",
             )
 
     # ─────────────────────────────────────────────────────────
@@ -262,9 +262,9 @@ class VendorsChatbot(BaseAgent):
             if not file_path:
                 yield make_text_event(
                     self.name,
-                    "I understood you want to upload a vendor document.\n"
+                    "I understood you want to upload a quotation document.\n"
                     "Please provide the file path, for example:\n"
-                    '  "Upload docs/dell_india_vendor.docx"',
+                    '  "Upload docs/dell_q3_quotation.pdf"',
                 )
             else:
                 async for ev in handle_upload(ctx, file_path, self.name):
@@ -284,11 +284,11 @@ class VendorsChatbot(BaseAgent):
             if not record_ids:
                 yield make_text_event(
                     self.name,
-                    "I understood you want to delete vendor record(s), but I couldn't "
+                    "I understood you want to delete quotation record(s), but I couldn't "
                     "identify which one(s).\n\n"
                     "Try:\n"
-                    '  "Delete the Dell vendor"\n'
-                    '  "Delete all vendors"\n'
+                    '  "Delete the Dell quotation"\n'
+                    '  "Delete all quotations"\n'
                     '  "Delete record <id>"',
                 )
             else:
@@ -301,11 +301,11 @@ class VendorsChatbot(BaseAgent):
             if not record_id or not new_file_path:
                 yield make_text_event(
                     self.name,
-                    "I understood you want to update a vendor, but I need "
+                    "I understood you want to update a quotation, but I need "
                     "both the record identifier and the new file path.\n\n"
                     "Try:\n"
-                    '  "Update the Dell vendor with docs/dell_v2.docx"\n'
-                    '  "Replace record 6642abc123 with docs/vendor_v2.docx"',
+                    '  "Update the Dell quotation with docs/dell_q4.pdf"\n'
+                    '  "Replace record 6642abc123 with docs/quotation_v2.pdf"',
                 )
             else:
                 async for ev in handle_update(
@@ -323,11 +323,11 @@ class VendorsChatbot(BaseAgent):
 # EXPORTS
 # ─────────────────────────────────────────────────────────────
 
-vendors_agent = VendorsChatbot()
+quotation_agent = QuotationChatbot()
 
 app = App(
-    name="vendors_chatbot_app",
-    root_agent=vendors_agent,
+    name="quotation_chatbot_app",
+    root_agent=quotation_agent,
 )
 
-__all__ = ["vendors_agent", "app"]
+__all__ = ["quotation_agent", "app"]

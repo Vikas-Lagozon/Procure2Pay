@@ -14,7 +14,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 # ─────────────────────────────────────────────────────────────────────────────
 
-from chatbot import chat_stream
+from chatbot import chat_stream, close as close_session
 
 _DELETE_KEYWORDS = (
     "delete", "remove", "erase", "drop", "wipe", "purge", "clear",
@@ -38,6 +38,7 @@ async def main():
 
             if user_input.lower() in {"exit", "quit", "bye"}:
                 print("\n👋 Goodbye!")
+                await close_session()
                 break
 
             # ── Delete confirmation guard ──────────────────────
@@ -60,9 +61,11 @@ async def main():
 
         except KeyboardInterrupt:
             print("\n\n👋 Goodbye!")
+            await close_session()
             break
         except Exception as e:
             print(f"\nError: {e}")
+            await close_session()
             break
 
 
@@ -72,4 +75,3 @@ if __name__ == "__main__":
         asyncio.run(main(), loop_factory=asyncio.SelectorEventLoop)
     else:
         asyncio.run(main())
-

@@ -1,4 +1,7 @@
 # agent.py — Email Agent
+"""
+Email Agent for Intelligent Email Automation with Gmail Integration
+"""
 
 import os
 import sys
@@ -40,6 +43,10 @@ os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 # KNOWLEDGE BASE BUILDER
 # ─────────────────────────────────────────────────────────────
 def _build_system_instruction() -> str:
+    """
+    Build the system instruction by appending the knowledge base context.
+    The KB is static (loaded at startup) — no session state is read here.
+    """
     kb_context = kb_loader.get_combined_context()
     if kb_context:
         return (
@@ -68,7 +75,7 @@ email_agent = LlmAgent(
 )
 
 app = App(
-    name="email_app",
+    name="email_chatbot_app",
     root_agent=email_agent,
 )
 

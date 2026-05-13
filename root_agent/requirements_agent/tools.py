@@ -36,7 +36,7 @@ from requirements_agent.logger import get_logger
 logger = get_logger(__name__)
 
 MODEL       = config.MODEL
-STORAGE_DIR = _AGENT_DIR / "REQUIREMENTS"   # always absolute, CWD-independent
+STORAGE_DIR = _AGENT_DIR / "REQUIREMENTS"
 
 requirements_collection = MongoCollection("requirements")
 

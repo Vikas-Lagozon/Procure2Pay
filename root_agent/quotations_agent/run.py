@@ -1,6 +1,6 @@
-# requirements_agent/run.py
+# quotation_agent/run.py
 """
-Standalone CLI entry-point for the Requirements Agent.
+Standalone CLI entry-point for the Quotation Agent.
 """
 
 import sys
@@ -8,8 +8,8 @@ import asyncio
 from pathlib import Path
 
 # ── Ensure both the agent dir and root dir are on sys.path ──────────────────
-_AGENT_DIR = Path(__file__).resolve().parent
-_ROOT_DIR  = _AGENT_DIR.parent
+_AGENT_DIR = Path(__file__).resolve().parent   # quotation_agent/
+_ROOT_DIR  = _AGENT_DIR.parent                 # project root
 for _p in (_AGENT_DIR, _ROOT_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
@@ -19,10 +19,10 @@ from google.genai import types
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 
-from requirements_agent.agent import requirements_agent
-from requirements_agent.prompts import HELP_TEXT
+from quotations_agent.agent import quotation_agent
+from quotations_agent.prompts import HELP_TEXT
 
-APP_NAME = "requirements_chatbot_app"
+APP_NAME = "quotation_chatbot_app"
 USER_ID  = "user_001"
 
 _DELETE_KEYWORDS = (
@@ -84,7 +84,7 @@ async def send_message(runner: Runner, session_id: str, user_text: str) -> None:
 async def main() -> None:
     session_service = InMemorySessionService()
     runner = Runner(
-        agent=requirements_agent,
+        agent=quotation_agent,
         app_name=APP_NAME,
         session_service=session_service,
     )
@@ -94,7 +94,7 @@ async def main() -> None:
     )
 
     print("=" * 52)
-    print("        Requirements Chatbot")
+    print("           Quotation Chatbot")
     print("=" * 52)
     print(HELP_TEXT)
 
@@ -115,7 +115,7 @@ async def main() -> None:
             print("\nExiting chatbot. Goodbye!")
             break
 
-        if lower == "/help":
+        if lower in ("/help_quotation", "/help"):
             print(HELP_TEXT)
             continue
 
@@ -150,4 +150,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-

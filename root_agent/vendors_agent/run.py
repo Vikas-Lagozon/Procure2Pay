@@ -1,4 +1,7 @@
-# vendors_agent/run.py  —  Vendors Agent CLI entry point
+# vendors_agent/run.py
+"""
+Standalone CLI entry-point for the Vendors Agent.
+"""
 
 import sys
 import asyncio
@@ -26,20 +29,56 @@ _DELETE_KEYWORDS = (
     "delete", "remove", "erase", "drop", "wipe", "purge", "clear",
 )
 
+# ── Conversation history ─────────────────────────────────────
+# Each entry: {"role": "user"|"assistant", "text": str}
+_conversation_history: list[dict] = []
+_MAX_HISTORY_TURNS = 20          # keep last N turns (user+assistant pairs)
 
-async def send_message(runner: Runner, session_id: str, text: str) -> None:
+
+def _build_message_with_history(user_text: str) -> str:
+    """
+    Prepend a concise conversation history block to the raw user message so
+    the stateless agent has enough context to resolve pronouns and references.
+    """
+    if not _conversation_history:
+        return user_text
+
+    lines = ["[CONVERSATION HISTORY]"]
+    for entry in _conversation_history[-(_MAX_HISTORY_TURNS * 2):]:
+        role  = "User"      if entry["role"] == "user"      else "Assistant"
+        lines.append(f"{role}: {entry['text']}")
+    lines.append("[END HISTORY]")
+    lines.append("")
+    lines.append(user_text)
+    return "\n".join(lines)
+
+
+async def send_message(runner: Runner, session_id: str, user_text: str) -> None:
+    """Send one enriched message and collect the agent reply."""
+    enriched = _build_message_with_history(user_text)
+
+    reply_parts: list[str] = []
+
     async for event in runner.run_async(
         user_id=USER_ID,
         session_id=session_id,
         new_message=types.Content(
             role="user",
-            parts=[types.Part(text=text)],
+            parts=[types.Part(text=enriched)],
         ),
     ):
         if event.is_final_response() and event.content:
             for part in event.content.parts:
                 if getattr(part, "text", None):
-                    print(f"\nBot: {part.text}")
+                    reply_parts.append(part.text)
+
+    reply = "\n".join(reply_parts).strip()
+
+    if reply:
+        print(f"\nBot: {reply}")
+        # ── Record both turns in history ──────────────────────
+        _conversation_history.append({"role": "user",      "text": user_text})
+        _conversation_history.append({"role": "assistant", "text": reply})
 
 
 async def main() -> None:
@@ -71,13 +110,28 @@ async def main() -> None:
 
         lower = user_input.lower()
 
-        # ── Local commands handled before sending to agent ────
+        # ── Local commands ────────────────────────────────────
         if lower in ("/exit", "exit", "quit"):
             print("\nExiting chatbot. Goodbye!")
             break
 
         if lower in ("/help_vendor", "/help"):
             print(HELP_TEXT)
+            continue
+
+        if lower == "/history":
+            if not _conversation_history:
+                print("  (no history yet)")
+            else:
+                print("\n── Conversation History ──")
+                for i, entry in enumerate(_conversation_history, 1):
+                    role = "You" if entry["role"] == "user" else "Bot"
+                    print(f"  [{i}] {role}: {entry['text'][:120]}")
+            continue
+
+        if lower == "/clear_history":
+            _conversation_history.clear()
+            print("  Conversation history cleared.\n")
             continue
 
         # ── Delete confirmation guard ─────────────────────────

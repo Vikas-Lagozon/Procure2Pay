@@ -50,7 +50,7 @@ class Config:
 
     # ── Gmail OAuth2 ──────────────────────────────────────────
     # Path to the OAuth2 client credentials JSON downloaded from
-    # Google Cloud Console → APIs & Services → Credentials
+    # Google Cloud Console -> APIs & Services -> Credentials
     GMAIL_CREDENTIALS_FILE: str = os.getenv(
         "GMAIL_CREDENTIALS_FILE", "credentials.json"
     )
@@ -85,6 +85,14 @@ class Config:
     ATTACHMENT_BASE_DIR: Path = Path(
         os.getenv("ATTACHMENT_DIR", "attachments")
     )
+    # Folder for attachments that were sent in outbound emails (auto-populated)
+    SENT_ATTACHMENTS_DIR: Path = Path(
+        os.getenv("SENT_ATTACHMENTS_DIR", "SENT_ATTACHMENTS")
+    )
+    # Folder for attachments received in inbound emails (user-triggered save)
+    RECEIVED_ATTACHMENTS_DIR: Path = Path(
+        os.getenv("RECEIVED_ATTACHMENTS_DIR", "RECEIVED_ATTACHMENTS")
+    )
     # Maximum allowed attachment size in megabytes
     MAX_ATTACHMENT_SIZE_MB: int = int(os.getenv("MAX_ATTACHMENT_SIZE_MB", "25"))
 
@@ -110,3 +118,4 @@ class Config:
 
 
 config = Config()
+

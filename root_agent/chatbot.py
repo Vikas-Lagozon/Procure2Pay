@@ -1,4 +1,4 @@
-# chatbot.py
+# root_agent/chatbot.py
 # ─────────────────────────────────────────────────────────────
 # Jarvis — Procure-to-Pay Root Agent
 # ─────────────────────────────────────────────────────────────
@@ -14,11 +14,10 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
 from config import config
 from logger import get_logger
 from prompt import SYSTEM_INSTRUCTION
-# ─────────────────────────────────────────────────────────────────────────────
+from tools import ROOT_TOOLS  # ← direct-DB tools for Jarvis
 
 from google.adk.agents import LlmAgent
 from google.adk.apps import App
@@ -26,9 +25,12 @@ from google.adk.sessions import DatabaseSessionService
 from google.adk import Runner
 import google.genai.types as types
 
-# ── Sub-agents (imported AFTER root modules to prevent sys.path pollution) ───
+# ── Sub-agents ───────────────────────────────────────────────────────────────
+# Import order matters: root modules first, then sub-agents to avoid
+# sys.path pollution between packages.
 from requirements_agent.agent import requirements_agent
 from vendors_agent.agent import vendors_agent
+from quotations_agent.agent import quotation_agent
 from email_agent.agent import email_agent
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -58,10 +60,12 @@ root_agent = LlmAgent(
     name        = "jarvis_root_agent",
     model       = MODEL,
     instruction = SYSTEM_INSTRUCTION,
+    tools       = ROOT_TOOLS,          # ← direct-DB tools
     sub_agents  = [
-        requirements_agent,
-        vendors_agent,
-        email_agent,
+        requirements_agent,            # CRUD for requirement docs
+        vendors_agent,                 # CRUD for vendor docs
+        quotation_agent,               # CRUD for quotation docs  ← added
+        email_agent,                   # all Gmail operations
     ],
 )
 
@@ -128,6 +132,25 @@ async def get_or_create_session(user_id: str, session_id: str):
 
 
 # ─────────────────────────────────────────────────────────────
+# GRACEFUL SHUTDOWN
+# ─────────────────────────────────────────────────────────────
+
+async def close():
+    """
+    Dispose the SQLAlchemy engine used by DatabaseSessionService.
+    Call this once before the event loop exits to prevent lingering
+    connection warnings on Windows (WinError 10053).
+    """
+    try:
+        engine = getattr(session_service, "_engine", None)
+        if engine is not None:
+            await engine.dispose()
+            logger.info("Session service engine disposed cleanly.")
+    except Exception as exc:
+        logger.debug(f"Engine dispose skipped: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────
 # STREAMING CHAT FUNCTION
 # ─────────────────────────────────────────────────────────────
 
@@ -138,7 +161,7 @@ async def chat_stream(user_input: str, session_id: str):
     Parameters
     ----------
     user_input : str
-        The raw message from the end user.
+        Raw message from the end user.
     session_id : str
         Unique identifier for this conversation session.
 

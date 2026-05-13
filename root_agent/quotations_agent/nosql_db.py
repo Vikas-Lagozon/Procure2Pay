@@ -22,8 +22,8 @@ from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import ConnectionFailure, OperationFailure, PyMongoError
 
-from email_agent.config import config
-from email_agent.logger import get_logger
+from quotations_agent.config import config
+from quotations_agent.logger import get_logger
 
 logger = get_logger(__name__)
 

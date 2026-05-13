@@ -11,6 +11,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -38,22 +39,30 @@ from googleapiclient.errors import HttpError
 
 import google.genai as genai
 
-from .config import config
-from .logger import get_logger
-from .nosql_db import MongoCollection
+from email_agent.config import config
+from email_agent.logger import get_logger
+from email_agent.nosql_db import MongoCollection
 
 logger = get_logger(__name__)
 
 # ── MongoDB collections ───────────────────────────────────────
-_emails_col      = MongoCollection("emails")
-_threads_col     = MongoCollection("threads")
-_attachments_col = MongoCollection("attachments")
-_contacts_col    = MongoCollection("contacts")
+_emails_col       = MongoCollection("emails")
+_threads_col      = MongoCollection("threads")
+_attachments_col  = MongoCollection("attachments")
+_contacts_col     = MongoCollection("contacts")
+_sent_att_col     = MongoCollection("sent_attachments")
+_received_att_col = MongoCollection("received_attachments")
 
 # ── Send deduplication guard ──────────────────────────────────
 _send_lock: threading.Lock = threading.Lock()
-_recent_sends: dict[str, float] = {}   # key → timestamp of last send
+_recent_sends: dict[str, float] = {}   # key -> timestamp of last send
 _SEND_DEDUP_TTL: int = 30              # seconds — block duplicate sends within this window
+
+# ── Text-readable file extensions ────────────────────────────
+_TEXT_EXTENSIONS: frozenset[str] = frozenset({
+    ".txt", ".md", ".csv", ".json", ".xml", ".html",
+    ".log", ".yaml", ".yml", ".ini", ".cfg", ".rst",
+})
 
 
 def _make_send_key(to: list[str]) -> str:
@@ -119,8 +128,8 @@ class GmailAuthManager:
                 if not creds_path.exists():
                     raise FileNotFoundError(
                         f"Gmail credentials file not found: {creds_path}\n"
-                        "Download it from Google Cloud Console → APIs & Services "
-                        "→ Credentials and save as credentials.json."
+                        "Download it from Google Cloud Console -> APIs & Services "
+                        "-> Credentials and save as credentials.json."
                     )
                 logger.info("[Auth] Starting OAuth2 browser flow (Gmail + Contacts).")
                 flow = InstalledAppFlow.from_client_secrets_file(
@@ -155,7 +164,7 @@ _auth_manager = GmailAuthManager()
 
 
 # ═════════════════════════════════════════════════════════════
-# SEMANTIC EMAIL CLASSIFIER
+# SEMANTIC CLASSIFIERS
 # ═════════════════════════════════════════════════════════════
 
 def _classify_email(subject: str, snippet: str, category: str) -> bool:
@@ -192,6 +201,41 @@ def _classify_email(subject: str, snippet: str, category: str) -> bool:
     except Exception as exc:
         logger.warning(f"[tools] _classify_email error — defaulting include: {exc}")
         return True   # safe default: include rather than silently drop
+
+
+def _classify_attachment(filename: str, subject: str, category: str) -> bool:
+    """
+    Ask Gemini whether an attachment belongs to a requested semantic category.
+
+    Used by list_sent_attachments and list_received_attachments when
+    semantic_filter is set. Falls back to True on any API error.
+
+    Args:
+        filename: The attachment filename, e.g. 'printer_specs.pdf'.
+        subject:  Subject of the email the attachment was part of.
+        category: Natural-language category, e.g. 'technical', 'laptop related'.
+
+    Returns:
+        True if the attachment belongs to the category, False otherwise.
+    """
+    prompt = (
+        f"You are a document classifier. Based only on the filename and email "
+        f"subject below, does this attachment belong to the category '{category}'?\n\n"
+        f"Filename: {filename}\n"
+        f"Email subject: {subject}\n\n"
+        "Reply with exactly one word — YES or NO."
+    )
+    try:
+        client   = genai.Client(api_key=config.GOOGLE_API_KEY)
+        response = client.models.generate_content(
+            model    = "gemini-2.0-flash",
+            contents = prompt,
+        )
+        answer = (response.text or "").strip().upper()
+        return answer.startswith("YES")
+    except Exception as exc:
+        logger.warning(f"[tools] _classify_attachment error — defaulting include: {exc}")
+        return True
 
 
 # ═════════════════════════════════════════════════════════════
@@ -370,6 +414,71 @@ def _upsert_thread(thread_id: str, subject: str, participants: list[str]) -> Non
         logger.error(f"[DB] Failed to upsert thread: {exc}")
 
 
+def _copy_to_sent_attachments(
+    attachments: list[str],
+    to: list[str],
+    cc: list[str],
+    subject: str,
+    message_id: str,
+    thread_id: str,
+) -> None:
+    """
+    Copy each outbound attachment file into SENT_ATTACHMENTS/ and persist
+    a metadata record in the sent_attachments MongoDB collection.
+
+    Called automatically after every successful send_email or reply_to_email.
+    Failures are logged but never propagated — the email is already delivered.
+
+    Args:
+        attachments: List of source file paths used in the outbound email.
+        to:          List of primary recipient email addresses.
+        cc:          List of CC recipient email addresses.
+        subject:     Email subject line.
+        message_id:  Gmail message ID returned after sending.
+        thread_id:   Gmail thread ID.
+    """
+    if not attachments:
+        return
+
+    sent_dir = config.SENT_ATTACHMENTS_DIR
+    sent_dir.mkdir(parents=True, exist_ok=True)
+
+    for file_path in attachments:
+        try:
+            src = Path(file_path)
+            if not src.exists():
+                logger.warning(
+                    f"[sent_attachments] Source file missing, skipping: {file_path}"
+                )
+                continue
+
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            safe_name = re.sub(r"[^\w.\-]", "_", src.name)
+            dest      = sent_dir / f"{timestamp}_{safe_name}"
+
+            shutil.copy2(src, dest)
+
+            _sent_att_col.insert_one({
+                "filename":       src.name,
+                "saved_path":     str(dest),
+                "original_path":  str(src),
+                "to":             to,
+                "cc":             cc,
+                "subject":        subject,
+                "message_id":     message_id,
+                "thread_id":      thread_id,
+                "size_bytes":     src.stat().st_size,
+                "file_extension": src.suffix.lower(),
+                "sent_at":        datetime.utcnow().isoformat(),
+            })
+            logger.info(f"[sent_attachments] Saved: {dest}")
+
+        except Exception as exc:
+            logger.warning(
+                f"[sent_attachments] Failed to copy '{file_path}': {exc}"
+            )
+
+
 def _decode_body(payload: dict) -> str:
     """Extract plain-text body from a Gmail message payload."""
     body = ""
@@ -401,8 +510,7 @@ def _extract_attachment_names(payload: dict) -> list[str]:
     names: list[str] = []
 
     def _scan(p: dict) -> None:
-        filename = p.get("filename", "")
-        # Gmail sets filename on attachment parts; skip inline body parts
+        filename  = p.get("filename", "")
         body_size = p.get("body", {}).get("size", 0)
         if filename and body_size > 0:
             names.append(filename)
@@ -444,7 +552,9 @@ def send_email(
         cc: List of CC recipient email addresses (optional).
         bcc: List of BCC recipient email addresses (optional).
         attachments: List of local file paths to attach (optional).
-        sender: Sender email address. Defaults to DEFAULT_SENDER_EMAIL.
+            Attached files are automatically copied to SENT_ATTACHMENTS/
+            and indexed in MongoDB after a successful send.
+        sender: Sender address. Defaults to DEFAULT_SENDER_EMAIL.
 
     Returns:
         dict with keys: success (bool), message_id (str), thread_id (str),
@@ -519,31 +629,37 @@ def send_email(
                 .execute()
             )
 
-        result = _retry(_do_send)
+        result     = _retry(_do_send)
         message_id = result.get("id", "")
         thread_id  = result.get("threadId", "")
 
         logger.info(
-            f"[send_email] Sent ✓ | message_id={message_id} thread_id={thread_id}"
+            f"[send_email] Sent | message_id={message_id} thread_id={thread_id}"
         )
 
-        # ── Persist to MongoDB ────────────────────────────────
+        # ── Persist email record ──────────────────────────────
         _store_email_record(
             {
-                "message_id": message_id,
-                "thread_id":  thread_id,
-                "sender":     sender,
-                "to":         to,
-                "cc":         cc,
-                "bcc":        bcc,
-                "subject":    subject,
-                "body":       body,
+                "message_id":  message_id,
+                "thread_id":   thread_id,
+                "sender":      sender,
+                "to":          to,
+                "cc":          cc,
+                "bcc":         bcc,
+                "subject":     subject,
+                "body":        body,
                 "attachments": attachments,
-                "status":     "sent",
-                "timestamp":  datetime.utcnow().isoformat(),
+                "status":      "sent",
+                "timestamp":   datetime.utcnow().isoformat(),
             }
         )
         _upsert_thread(thread_id, subject, [sender] + to + cc)
+
+        # ── Archive sent attachments ──────────────────────────
+        if attachments:
+            _copy_to_sent_attachments(
+                attachments, to, cc, subject, message_id, thread_id
+            )
 
         return {
             "success":    True,
@@ -568,6 +684,7 @@ def send_email(
         )
         return {"success": False, "message_id": "", "thread_id": "", "error": str(exc)}
 
+
 # ═════════════════════════════════════════════════════════════
 # TOOL 2 — read_emails
 # ═════════════════════════════════════════════════════════════
@@ -589,7 +706,7 @@ def read_emails(
         max_results: Maximum number of emails to return after all filtering
                      (default 10, hard cap 50).
                      When cc_domain or semantic_filter is active, the tool
-                     over-fetches by 5× internally to ensure enough results
+                     over-fetches by 5x internally to ensure enough results
                      survive filtering.
         cc_domain: If set (e.g. "@lagozon.com"), only return emails where at
                    least one CC address ends with this domain.
@@ -737,6 +854,7 @@ def read_emails(
             "filters_applied": [], "error": str(exc),
         }
 
+
 # ═════════════════════════════════════════════════════════════
 # TOOL 3 — get_thread
 # ═════════════════════════════════════════════════════════════
@@ -799,7 +917,6 @@ def get_thread(thread_id: str) -> dict:
             participants.add(sender)
             participants.update(to_addr.split(","))
 
-            # ── Attachment detection ──────────────────────────
             attachment_names = _extract_attachment_names(payload)
 
             msg_record = {
@@ -843,6 +960,7 @@ def get_thread(thread_id: str) -> dict:
             "error":     str(exc),
         }
 
+
 # ═════════════════════════════════════════════════════════════
 # TOOL 4 — reply_to_email
 # ═════════════════════════════════════════════════════════════
@@ -870,6 +988,8 @@ def reply_to_email(
         to: Override recipients. If omitted, replies to the original sender.
         cc: CC recipients (optional).
         attachments: Local file paths to attach (optional).
+            Attached files are automatically copied to SENT_ATTACHMENTS/
+            and indexed in MongoDB after a successful send.
         sender: Sender email address. Defaults to DEFAULT_SENDER_EMAIL.
 
     Returns:
@@ -901,7 +1021,7 @@ def reply_to_email(
         thread_msgs = thread_data["messages"]
         last_msg    = thread_msgs[-1]
 
-        subject   = thread_data["subject"]
+        subject = thread_data["subject"]
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
 
@@ -914,7 +1034,6 @@ def reply_to_email(
         # Default reply-to: original sender
         if not to:
             original_sender = last_msg.get("sender", "")
-            # Parse "Display Name <email@addr>" format
             match = re.search(r"<(.+?)>", original_sender)
             to = [match.group(1) if match else original_sender]
 
@@ -953,26 +1072,32 @@ def reply_to_email(
         result     = _retry(_do_send)
         new_msg_id = result.get("id", "")
         logger.info(
-            f"[reply_to_email] Reply sent ✓ | message_id={new_msg_id} thread_id={thread_id}"
+            f"[reply_to_email] Reply sent | message_id={new_msg_id} thread_id={thread_id}"
         )
 
-        # ── Persist ───────────────────────────────────────────
+        # ── Persist email record ──────────────────────────────
         _store_email_record(
             {
-                "message_id": new_msg_id,
-                "thread_id":  thread_id,
-                "sender":     sender,
-                "to":         to,
-                "cc":         cc,
-                "subject":    subject,
-                "body":       body,
+                "message_id":  new_msg_id,
+                "thread_id":   thread_id,
+                "sender":      sender,
+                "to":          to,
+                "cc":          cc,
+                "subject":     subject,
+                "body":        body,
                 "attachments": attachments,
                 "in_reply_to": in_reply_to,
-                "status":     "replied",
-                "timestamp":  datetime.utcnow().isoformat(),
+                "status":      "replied",
+                "timestamp":   datetime.utcnow().isoformat(),
             }
         )
         _upsert_thread(thread_id, subject, [sender] + to + cc)
+
+        # ── Archive sent attachments ──────────────────────────
+        if attachments:
+            _copy_to_sent_attachments(
+                attachments, to, cc, subject, new_msg_id, thread_id
+            )
 
         return {
             "success":    True,
@@ -1078,7 +1203,6 @@ def download_attachments(
 
                 def _process_parts(parts_list: list) -> None:
                     for part in parts_list:
-                        # Recurse into nested parts
                         if part.get("parts"):
                             _process_parts(part["parts"])
 
@@ -1089,7 +1213,6 @@ def download_attachments(
                         if not filename or not att_id:
                             continue
 
-                        # Fetch attachment data
                         def _fetch_att(m=mid, a=att_id):
                             return (
                                 service.users()
@@ -1104,7 +1227,6 @@ def download_attachments(
                             att_data.get("data", "")
                         )
 
-                        # Size check
                         size_mb = len(file_data) / (1024 * 1024)
                         if size_mb > config.MAX_ATTACHMENT_SIZE_MB:
                             logger.warning(
@@ -1113,7 +1235,6 @@ def download_attachments(
                             )
                             continue
 
-                        # Structured path: attachments/{thread_id}/{ts}_{name}
                         thread_dir = base_dir / raw_thread
                         thread_dir.mkdir(parents=True, exist_ok=True)
                         timestamp  = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -1125,15 +1246,14 @@ def download_attachments(
                             f"[download_attachments] Saved: {dest} ({size_mb:.2f} MB)"
                         )
 
-                        # Persist attachment metadata
                         try:
                             _attachments_col.insert_one(
                                 {
-                                    "message_id":  mid,
-                                    "thread_id":   raw_thread,
-                                    "filename":    filename,
-                                    "size_bytes":  len(file_data),
-                                    "local_path":  str(dest),
+                                    "message_id":    mid,
+                                    "thread_id":     raw_thread,
+                                    "filename":      filename,
+                                    "size_bytes":    len(file_data),
+                                    "local_path":    str(dest),
                                     "downloaded_at": datetime.utcnow().isoformat(),
                                 }
                             )
@@ -1260,7 +1380,6 @@ def list_contacts(
         service = _auth_manager.get_people_service()
         q_lower = query.lower() if query else ""
 
-        # ── Helper: parse a People API person record ──────────
         def _parse_person(person: dict, source: str) -> dict | None:
             names  = person.get("names", [])
             emails = person.get("emailAddresses", [])
@@ -1285,7 +1404,7 @@ def list_contacts(
             return {"name": name, "emails": e_list, "phones": p_list, "source": source}
 
         contacts: list[dict] = []
-        seen_emails: set[str] = set()   # dedup across both sources
+        seen_emails: set[str] = set()
 
         # ── SOURCE 1: "My Contacts" (people.connections) ──────
         try:
@@ -1327,8 +1446,8 @@ def list_contacts(
             next_page_token = ""
             while len(contacts) < max_results:
                 kwargs2: dict = {
-                    "pageSize":     min(max_results, 1000),
-                    "readMask":     "names,emailAddresses,phoneNumbers",
+                    "pageSize": min(max_results, 1000),
+                    "readMask": "names,emailAddresses,phoneNumbers",
                 }
                 if next_page_token:
                     kwargs2["pageToken"] = next_page_token
@@ -1345,7 +1464,7 @@ def list_contacts(
                     parsed = _parse_person(person, "other_contacts")
                     if parsed:
                         primary = parsed["emails"][0].lower()
-                        if primary not in seen_emails:   # dedup
+                        if primary not in seen_emails:
                             seen_emails.add(primary)
                             contacts.append(parsed)
 
@@ -1389,6 +1508,612 @@ def list_contacts(
         logger.error(f"[list_contacts] People API error: {exc}")
         return {"success": False, "contacts": [], "total": 0, "error": str(exc)}
 
+
+# ═════════════════════════════════════════════════════════════
+# TOOL 8 — list_sent_attachments
+# ═════════════════════════════════════════════════════════════
+
+def list_sent_attachments(
+    semantic_filter: str = "",
+    recipient_filter: str = "",
+    filename_filter: str = "",
+    limit: int = 50,
+) -> dict:
+    """
+    List attachments that were sent in outbound emails, with optional filters.
+
+    Records are created automatically every time send_email or reply_to_email
+    succeeds with attachments. Each record includes the filename, saved path,
+    recipients, email subject, message/thread IDs, and timestamp.
+
+    Use this tool to answer queries such as:
+      - "List all sent attachments"
+      - "How many technical attachments have I sent?"
+      - "Show sent docs related to laptop"
+      - "To which vendors did I send a printer attachment?"
+
+    Args:
+        semantic_filter: Natural-language category to classify attachments by
+                         (e.g. "technical", "related to laptop", "quotation").
+                         Classification is performed per-file by Gemini using
+                         the filename and email subject as context.
+                         Leave empty to skip classification.
+        recipient_filter: Case-insensitive substring matched against recipient
+                          email addresses in the 'to' field
+                          (e.g. "vendor.com", "john@acme.com").
+                          Leave empty to return all recipients.
+        filename_filter: Case-insensitive substring matched against the filename
+                         (e.g. "printer", "invoice", ".pdf").
+                         Leave empty to return all filenames.
+        limit: Maximum number of records to return (default 50).
+
+    Returns:
+        dict with keys:
+          - success (bool)
+          - attachments (list) — each record has: _id, filename, saved_path,
+            original_path, to (list), cc (list), subject, message_id,
+            thread_id, size_bytes, file_extension, sent_at
+          - total (int)
+          - filters_applied (list[str])
+          - error (str)
+    """
+    logger.info(
+        f"[list_sent_attachments] semantic='{semantic_filter}' "
+        f"recipient='{recipient_filter}' filename='{filename_filter}' limit={limit}"
+    )
+
+    try:
+        mongo_filter: dict = {}
+
+        if recipient_filter:
+            mongo_filter["to"] = {
+                "$elemMatch": {"$regex": recipient_filter, "$options": "i"}
+            }
+
+        if filename_filter:
+            mongo_filter["filename"] = {"$regex": filename_filter, "$options": "i"}
+
+        records = _sent_att_col.fetch_all(
+            filter=mongo_filter,
+            sort=[("sent_at", -1)],
+            limit=limit,
+        )
+
+        filters_applied: list[str] = []
+
+        if recipient_filter:
+            filters_applied.append("recipient")
+        if filename_filter:
+            filters_applied.append("filename")
+
+        # Semantic classification runs client-side via Gemini
+        if semantic_filter and records:
+            filters_applied.append("semantic")
+            records = [
+                r for r in records
+                if _classify_attachment(
+                    r.get("filename", ""),
+                    r.get("subject", ""),
+                    semantic_filter,
+                )
+            ]
+
+        logger.info(f"[list_sent_attachments] Returning {len(records)} record(s).")
+        return {
+            "success":          True,
+            "attachments":      records,
+            "total":            len(records),
+            "filters_applied":  filters_applied,
+            "error":            "",
+        }
+
+    except Exception as exc:
+        logger.error(f"[list_sent_attachments] Error: {exc}")
+        return {
+            "success": False, "attachments": [], "total": 0,
+            "filters_applied": [], "error": str(exc),
+        }
+
+
+# ═════════════════════════════════════════════════════════════
+# TOOL 9 — manage_sent_attachment
+# ═════════════════════════════════════════════════════════════
+
+def manage_sent_attachment(
+    action: str,
+    doc_id: str,
+    new_file_path: str = "",
+) -> dict:
+    """
+    Perform a read, delete, or update operation on a single sent attachment.
+
+    Use doc_id from the _id field returned by list_sent_attachments.
+
+    Args:
+        action: Operation to perform. Must be one of:
+            read   - Return file content for text files, or metadata for
+                     binary files (PDF, DOCX, XLSX, images, etc.).
+            delete - Remove the local file from SENT_ATTACHMENTS/ and delete
+                     the MongoDB record.
+            update - Replace the stored file with a new file. The MongoDB
+                     record is updated with the new filename and size.
+        doc_id: MongoDB _id string of the sent attachment record.
+        new_file_path: Required only for action='update'. Absolute or relative
+                       path to the replacement file.
+
+    Returns:
+        dict with keys: success (bool), content or message (str), error (str).
+        For action='read': also includes metadata (dict) with the full record.
+    """
+    logger.info(f"[manage_sent_attachment] action='{action}' doc_id='{doc_id}'")
+
+    try:
+        record = _sent_att_col.fetch_by_id(doc_id)
+        if not record:
+            return {
+                "success": False,
+                "error": f"No sent attachment found with id: {doc_id}",
+            }
+
+        saved_path = Path(record.get("saved_path", ""))
+
+        if action == "read":
+            if not saved_path.exists():
+                return {
+                    "success": False,
+                    "error": f"File not found on disk: {saved_path}",
+                }
+            ext = saved_path.suffix.lower()
+            if ext in _TEXT_EXTENSIONS:
+                content = saved_path.read_text(encoding="utf-8", errors="replace")
+                return {
+                    "success":  True,
+                    "content":  content,
+                    "metadata": record,
+                    "error":    "",
+                }
+            return {
+                "success":  True,
+                "content":  f"Binary file ({ext}) — cannot display inline.",
+                "metadata": record,
+                "error":    "",
+            }
+
+        elif action == "delete":
+            if saved_path.exists():
+                saved_path.unlink()
+                logger.info(f"[manage_sent_attachment] Deleted file: {saved_path}")
+            _sent_att_col.delete_by_id(doc_id)
+            return {
+                "success": True,
+                "message": f"Deleted: {record.get('filename')}",
+                "error":   "",
+            }
+
+        elif action == "update":
+            if not new_file_path:
+                return {
+                    "success": False,
+                    "error": "new_file_path is required for action='update'.",
+                }
+            new_src = Path(new_file_path)
+            if not new_src.exists():
+                return {
+                    "success": False,
+                    "error": f"Replacement file not found: {new_file_path}",
+                }
+            shutil.copy2(new_src, saved_path)
+            _sent_att_col.update_by_id(
+                doc_id,
+                {
+                    "filename":      new_src.name,
+                    "original_path": str(new_src),
+                    "size_bytes":    new_src.stat().st_size,
+                    "file_extension": new_src.suffix.lower(),
+                    "updated_at":    datetime.utcnow().isoformat(),
+                },
+            )
+            logger.info(
+                f"[manage_sent_attachment] Updated doc_id={doc_id} -> {new_src.name}"
+            )
+            return {
+                "success": True,
+                "message": f"Updated attachment to: {new_src.name}",
+                "error":   "",
+            }
+
+        else:
+            return {
+                "success": False,
+                "error": f"Unknown action: '{action}'. Valid values: read, delete, update.",
+            }
+
+    except Exception as exc:
+        logger.error(f"[manage_sent_attachment] Error: {exc}")
+        return {"success": False, "error": str(exc)}
+
+
+# ═════════════════════════════════════════════════════════════
+# TOOL 10 — save_received_attachments
+# ═════════════════════════════════════════════════════════════
+
+def save_received_attachments(
+    message_id: str,
+    thread_id: str = "",
+) -> dict:
+    """
+    Explicitly save attachments from a received Gmail message to
+    RECEIVED_ATTACHMENTS/ and index them in MongoDB.
+
+    Call this tool only when the user explicitly requests to save attachments
+    from a received email (e.g. "save the attachment from this email",
+    "store the documents I received from vendor X").
+
+    Each saved file is stored at:
+        RECEIVED_ATTACHMENTS/{thread_id}/{timestamp}_{filename}
+
+    A metadata record is inserted into the received_attachments collection
+    with the sender, subject, message/thread IDs, local path, and timestamp.
+
+    Args:
+        message_id: Gmail message ID of the email whose attachments to save.
+                    Obtain this from read_emails or get_thread results.
+        thread_id:  Gmail thread ID (optional, used for folder organisation).
+                    If omitted, the message's own threadId is used.
+
+    Returns:
+        dict with keys:
+          - success (bool)
+          - saved (list of dicts) — each has: filename, saved_path, size_bytes
+          - count (int)
+          - error (str)
+    """
+    logger.info(
+        f"[save_received_attachments] message_id={message_id} thread_id={thread_id}"
+    )
+
+    if not message_id:
+        return {
+            "success": False, "saved": [], "count": 0,
+            "error": "message_id is required.",
+        }
+
+    try:
+        service = _auth_manager.get_service()
+
+        def _get_msg():
+            return (
+                service.users()
+                .messages()
+                .get(userId="me", id=message_id, format="full")
+                .execute()
+            )
+
+        full_msg   = _retry(_get_msg)
+        payload    = full_msg.get("payload", {})
+        headers    = payload.get("headers", [])
+        raw_thread = thread_id or full_msg.get("threadId", message_id)
+
+        sender  = _extract_header(headers, "From")
+        subject = _extract_header(headers, "Subject")
+        date    = _extract_header(headers, "Date")
+
+        recv_dir = config.RECEIVED_ATTACHMENTS_DIR / raw_thread
+        recv_dir.mkdir(parents=True, exist_ok=True)
+
+        saved: list[dict] = []
+
+        def _process_parts(parts_list: list) -> None:
+            for part in parts_list:
+                if part.get("parts"):
+                    _process_parts(part["parts"])
+
+                filename = part.get("filename", "")
+                body     = part.get("body", {})
+                att_id   = body.get("attachmentId")
+
+                if not filename or not att_id:
+                    continue
+
+                def _fetch_att(m=message_id, a=att_id):
+                    return (
+                        service.users()
+                        .messages()
+                        .attachments()
+                        .get(userId="me", messageId=m, id=a)
+                        .execute()
+                    )
+
+                att_data  = _retry(_fetch_att)
+                file_data = base64.urlsafe_b64decode(att_data.get("data", ""))
+
+                size_bytes = len(file_data)
+                size_mb    = size_bytes / (1024 * 1024)
+                if size_mb > config.MAX_ATTACHMENT_SIZE_MB:
+                    logger.warning(
+                        f"[save_received_attachments] Skipping {filename}: "
+                        f"{size_mb:.1f} MB exceeds limit."
+                    )
+                    continue
+
+                timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                safe_name = re.sub(r"[^\w.\-]", "_", filename)
+                dest      = recv_dir / f"{timestamp}_{safe_name}"
+
+                dest.write_bytes(file_data)
+                logger.info(
+                    f"[save_received_attachments] Saved: {dest} ({size_mb:.2f} MB)"
+                )
+
+                try:
+                    _received_att_col.insert_one({
+                        "filename":       filename,
+                        "saved_path":     str(dest),
+                        "from_email":     sender,
+                        "subject":        subject,
+                        "email_date":     date,
+                        "message_id":     message_id,
+                        "thread_id":      raw_thread,
+                        "size_bytes":     size_bytes,
+                        "file_extension": Path(filename).suffix.lower(),
+                        "received_at":    datetime.utcnow().isoformat(),
+                    })
+                except Exception as db_exc:
+                    logger.warning(
+                        f"[save_received_attachments] DB insert failed: {db_exc}"
+                    )
+
+                saved.append({
+                    "filename":   filename,
+                    "saved_path": str(dest),
+                    "size_bytes": size_bytes,
+                })
+
+        _process_parts(payload.get("parts", []))
+
+        if not saved:
+            return {
+                "success": True,
+                "saved":   [],
+                "count":   0,
+                "error":   "No attachments found in the specified message.",
+            }
+
+        logger.info(
+            f"[save_received_attachments] Saved {len(saved)} file(s) from {message_id}."
+        )
+        return {
+            "success": True,
+            "saved":   saved,
+            "count":   len(saved),
+            "error":   "",
+        }
+
+    except HttpError as exc:
+        logger.error(f"[save_received_attachments] Gmail API error: {exc}")
+        return {"success": False, "saved": [], "count": 0, "error": str(exc)}
+    except Exception as exc:
+        logger.error(f"[save_received_attachments] Unexpected error: {exc}")
+        return {"success": False, "saved": [], "count": 0, "error": str(exc)}
+
+
+# ═════════════════════════════════════════════════════════════
+# TOOL 11 — list_received_attachments
+# ═════════════════════════════════════════════════════════════
+
+def list_received_attachments(
+    semantic_filter: str = "",
+    sender_filter: str = "",
+    filename_filter: str = "",
+    limit: int = 50,
+) -> dict:
+    """
+    List attachments received in inbound emails that have been explicitly
+    saved via save_received_attachments, with optional filters.
+
+    Use this tool to answer queries such as:
+      - "List all received attachments"
+      - "How many technical documents have I received?"
+      - "Show received docs related to laptop"
+      - "From which vendors have I received documents?"
+      - "What documents did I receive from vendor@acme.com?"
+
+    Args:
+        semantic_filter: Natural-language category to classify attachments by
+                         (e.g. "technical", "related to laptop", "invoice").
+                         Gemini classifies each file using filename + subject.
+                         Leave empty to skip classification.
+        sender_filter: Case-insensitive substring matched against the sender's
+                       email address or display name
+                       (e.g. "vendor.com", "john@acme.com", "Acme").
+                       Leave empty to return all senders.
+        filename_filter: Case-insensitive substring matched against the filename
+                         (e.g. "laptop", "invoice", ".pdf").
+                         Leave empty to return all filenames.
+        limit: Maximum number of records to return (default 50).
+
+    Returns:
+        dict with keys:
+          - success (bool)
+          - attachments (list) — each record has: _id, filename, saved_path,
+            from_email, subject, email_date, message_id, thread_id,
+            size_bytes, file_extension, received_at
+          - total (int)
+          - filters_applied (list[str])
+          - error (str)
+    """
+    logger.info(
+        f"[list_received_attachments] semantic='{semantic_filter}' "
+        f"sender='{sender_filter}' filename='{filename_filter}' limit={limit}"
+    )
+
+    try:
+        mongo_filter: dict = {}
+
+        if sender_filter:
+            mongo_filter["from_email"] = {"$regex": sender_filter, "$options": "i"}
+
+        if filename_filter:
+            mongo_filter["filename"] = {"$regex": filename_filter, "$options": "i"}
+
+        records = _received_att_col.fetch_all(
+            filter=mongo_filter,
+            sort=[("received_at", -1)],
+            limit=limit,
+        )
+
+        filters_applied: list[str] = []
+
+        if sender_filter:
+            filters_applied.append("sender")
+        if filename_filter:
+            filters_applied.append("filename")
+
+        if semantic_filter and records:
+            filters_applied.append("semantic")
+            records = [
+                r for r in records
+                if _classify_attachment(
+                    r.get("filename", ""),
+                    r.get("subject", ""),
+                    semantic_filter,
+                )
+            ]
+
+        logger.info(f"[list_received_attachments] Returning {len(records)} record(s).")
+        return {
+            "success":         True,
+            "attachments":     records,
+            "total":           len(records),
+            "filters_applied": filters_applied,
+            "error":           "",
+        }
+
+    except Exception as exc:
+        logger.error(f"[list_received_attachments] Error: {exc}")
+        return {
+            "success": False, "attachments": [], "total": 0,
+            "filters_applied": [], "error": str(exc),
+        }
+
+
+# ═════════════════════════════════════════════════════════════
+# TOOL 12 — manage_received_attachment
+# ═════════════════════════════════════════════════════════════
+
+def manage_received_attachment(
+    action: str,
+    doc_id: str,
+    new_file_path: str = "",
+) -> dict:
+    """
+    Perform a read, delete, or update operation on a single received attachment.
+
+    Use doc_id from the _id field returned by list_received_attachments.
+
+    Args:
+        action: Operation to perform. Must be one of:
+            read   - Return file content for text files, or metadata for
+                     binary files (PDF, DOCX, XLSX, images, etc.).
+            delete - Remove the local file from RECEIVED_ATTACHMENTS/ and
+                     delete the MongoDB record.
+            update - Replace the stored file with a new file at new_file_path.
+                     The MongoDB record is updated with the new filename and size.
+        doc_id: MongoDB _id string of the received attachment record.
+        new_file_path: Required only for action='update'. Absolute or relative
+                       path to the replacement file.
+
+    Returns:
+        dict with keys: success (bool), content or message (str), error (str).
+        For action='read': also includes metadata (dict) with the full record.
+    """
+    logger.info(f"[manage_received_attachment] action='{action}' doc_id='{doc_id}'")
+
+    try:
+        record = _received_att_col.fetch_by_id(doc_id)
+        if not record:
+            return {
+                "success": False,
+                "error": f"No received attachment found with id: {doc_id}",
+            }
+
+        saved_path = Path(record.get("saved_path", ""))
+
+        if action == "read":
+            if not saved_path.exists():
+                return {
+                    "success": False,
+                    "error": f"File not found on disk: {saved_path}",
+                }
+            ext = saved_path.suffix.lower()
+            if ext in _TEXT_EXTENSIONS:
+                content = saved_path.read_text(encoding="utf-8", errors="replace")
+                return {
+                    "success":  True,
+                    "content":  content,
+                    "metadata": record,
+                    "error":    "",
+                }
+            return {
+                "success":  True,
+                "content":  f"Binary file ({ext}) — cannot display inline.",
+                "metadata": record,
+                "error":    "",
+            }
+
+        elif action == "delete":
+            if saved_path.exists():
+                saved_path.unlink()
+                logger.info(f"[manage_received_attachment] Deleted file: {saved_path}")
+            _received_att_col.delete_by_id(doc_id)
+            return {
+                "success": True,
+                "message": f"Deleted: {record.get('filename')}",
+                "error":   "",
+            }
+
+        elif action == "update":
+            if not new_file_path:
+                return {
+                    "success": False,
+                    "error": "new_file_path is required for action='update'.",
+                }
+            new_src = Path(new_file_path)
+            if not new_src.exists():
+                return {
+                    "success": False,
+                    "error": f"Replacement file not found: {new_file_path}",
+                }
+            shutil.copy2(new_src, saved_path)
+            _received_att_col.update_by_id(
+                doc_id,
+                {
+                    "filename":       new_src.name,
+                    "size_bytes":     new_src.stat().st_size,
+                    "file_extension": new_src.suffix.lower(),
+                    "updated_at":     datetime.utcnow().isoformat(),
+                },
+            )
+            logger.info(
+                f"[manage_received_attachment] Updated doc_id={doc_id} -> {new_src.name}"
+            )
+            return {
+                "success": True,
+                "message": f"Updated attachment to: {new_src.name}",
+                "error":   "",
+            }
+
+        else:
+            return {
+                "success": False,
+                "error": f"Unknown action: '{action}'. Valid values: read, delete, update.",
+            }
+
+    except Exception as exc:
+        logger.error(f"[manage_received_attachment] Error: {exc}")
+        return {"success": False, "error": str(exc)}
+
+
 # ═════════════════════════════════════════════════════════════
 # TOOLS REGISTRY  (exported list for agent registration)
 # ═════════════════════════════════════════════════════════════
@@ -1401,4 +2126,9 @@ EMAIL_TOOLS = [
     download_attachments,
     attach_files,
     list_contacts,
+    list_sent_attachments,
+    manage_sent_attachment,
+    save_received_attachments,
+    list_received_attachments,
+    manage_received_attachment,
 ]
