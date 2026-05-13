@@ -11,6 +11,8 @@ import json
 import mimetypes
 import os
 import re
+import sys
+import threading
 import time
 from datetime import datetime
 from email import encoders
@@ -20,6 +22,14 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any
 
+# ─────────────────────────────────────────────────────────────
+_AGENT_DIR = Path(__file__).resolve().parent
+_ROOT_DIR  = _AGENT_DIR.parent
+for _p in (_AGENT_DIR, _ROOT_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+# ─────────────────────────────────────────────────────────────
+
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -28,9 +38,9 @@ from googleapiclient.errors import HttpError
 
 import google.genai as genai
 
-from config import config
-from logger import get_logger
-from nosql_db import MongoCollection
+from .config import config
+from .logger import get_logger
+from .nosql_db import MongoCollection
 
 logger = get_logger(__name__)
 
@@ -39,6 +49,16 @@ _emails_col      = MongoCollection("emails")
 _threads_col     = MongoCollection("threads")
 _attachments_col = MongoCollection("attachments")
 _contacts_col    = MongoCollection("contacts")
+
+# ── Send deduplication guard ──────────────────────────────────
+_send_lock: threading.Lock = threading.Lock()
+_recent_sends: dict[str, float] = {}   # key → timestamp of last send
+_SEND_DEDUP_TTL: int = 30              # seconds — block duplicate sends within this window
+
+
+def _make_send_key(to: list[str]) -> str:
+    """Create a normalised dedup key from the recipient list."""
+    return "|".join(sorted(a.lower().strip() for a in to))
 
 
 # ═════════════════════════════════════════════════════════════
@@ -75,7 +95,15 @@ class GmailAuthManager:
 
         creds: Credentials | None = None
         token_path = Path(config.GMAIL_TOKEN_FILE)
+        if not token_path.is_absolute():
+            token_path = _AGENT_DIR / token_path
+
         creds_path = Path(config.GMAIL_CREDENTIALS_FILE)
+        if not creds_path.is_absolute():
+            creds_path = _AGENT_DIR / creds_path
+
+        logger.debug(f"[Auth] token_path={token_path} | exists={token_path.exists()}")
+        logger.debug(f"[Auth] creds_path={creds_path} | exists={creds_path.exists()}")
 
         if token_path.exists():
             creds = Credentials.from_authorized_user_file(
@@ -429,6 +457,28 @@ def send_email(
 
     logger.info(f"[send_email] to={to} subject='{subject}'")
 
+    # ── Deduplication guard ───────────────────────────────────
+    send_key = _make_send_key(to)
+    now = time.time()
+    with _send_lock:
+        last_sent = _recent_sends.get(send_key, 0.0)
+        elapsed   = now - last_sent
+        if elapsed < _SEND_DEDUP_TTL:
+            msg = (
+                f"Email to {to} was already sent {int(elapsed)}s ago. "
+                f"Duplicate send blocked. The email has been delivered successfully — "
+                f"do NOT call send_email again."
+            )
+            logger.warning(f"[send_email] {msg}")
+            return {
+                "success":    True,
+                "message_id": "",
+                "thread_id":  "",
+                "error":      "",
+                "note":       msg,
+            }
+        _recent_sends[send_key] = now
+
     # ── Validate recipients ───────────────────────────────────
     all_recipients = to + cc + bcc
     valid, invalid = _validate_emails(all_recipients)
@@ -517,7 +567,6 @@ def send_email(
             }
         )
         return {"success": False, "message_id": "", "thread_id": "", "error": str(exc)}
-
 
 # ═════════════════════════════════════════════════════════════
 # TOOL 2 — read_emails

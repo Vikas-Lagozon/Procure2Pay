@@ -1,7 +1,8 @@
-# subagent.py
+# utils.py
 
 from __future__ import annotations
 
+import sys
 import asyncio
 import json
 import os
@@ -10,18 +11,25 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import google.generativeai as genai
+# ─────────────────────────────────────────────────────────────
+_AGENT_DIR = Path(__file__).resolve().parent   # vendors_agent/
+_ROOT_DIR  = _AGENT_DIR.parent                 # root_agent/
+for _p in (_AGENT_DIR, _ROOT_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+# ─────────────────────────────────────────────────────────────
 
-from config import config
-from logger import get_logger
-from nosql_db import MongoCollection
-from prompts import INTENT_EXTRACTION_PROMPT, EMAIL_BODY_GENERATION_PROMPT
+import google.genai as genai
+
+from .config import config
+from .logger import get_logger
+from .nosql_db import MongoCollection
+from .prompts import INTENT_EXTRACTION_PROMPT, EMAIL_BODY_GENERATION_PROMPT
 
 logger = get_logger(__name__)
 
-# ── Configure Gemini for direct subagent calls ────────────────
-genai.configure(api_key=config.GOOGLE_API_KEY)
-_gemini = genai.GenerativeModel(model_name=config.MODEL)
+# ── Configure Gemini client (google.genai) ───────────────────
+_gemini = genai.Client(api_key=config.GOOGLE_API_KEY)
 
 # ── MongoDB collections ───────────────────────────────────────
 _threads_col  = MongoCollection("threads")
@@ -71,7 +79,10 @@ class IntentParser:
         )
 
         try:
-            response = _gemini.generate_content(prompt)
+            response = _gemini.models.generate_content(
+                model=config.MODEL,
+                contents=prompt,
+            )
             raw      = response.text.strip()
 
             # Strip markdown fences if present
@@ -225,7 +236,10 @@ class EmailBodyGenerator:
         )
 
         try:
-            response = _gemini.generate_content(prompt)
+            response = _gemini.models.generate_content(
+                model=config.MODEL,
+                contents=prompt,
+            )
             body     = response.text.strip()
             logger.info("[EmailBodyGenerator] Body generated successfully.")
             return body
@@ -411,9 +425,16 @@ class KnowledgeBaseLoader:
 
     _cache: dict[str, str] = {}
 
+    # Anchor KB directory to this file's location so it resolves correctly
+    # whether the agent is launched from root_agent/, email_agent/, or anywhere else.
+    _KB_DIR: Path = Path(__file__).resolve().parent / "KNOWLEDGE_BASE"
+
     def load_all(self) -> dict[str, str]:
         """
-        Load all supported files from KNOWLEDGE_BASE_DIR.
+        Load all supported files from the KNOWLEDGE_BASE directory
+        (located at email_agent/KNOWLEDGE_BASE/).
+
+        Supports: .txt, .md, .json, .docx
 
         Returns:
             Dict mapping filename → content string.
@@ -421,7 +442,7 @@ class KnowledgeBaseLoader:
         if self._cache:
             return self._cache
 
-        kb_dir = config.KNOWLEDGE_BASE_DIR
+        kb_dir = self._KB_DIR
         if not kb_dir.exists():
             logger.warning(
                 f"[KnowledgeBase] Directory not found: {kb_dir}. "
@@ -430,18 +451,45 @@ class KnowledgeBaseLoader:
             return {}
 
         for file_path in kb_dir.iterdir():
-            if file_path.suffix.lower() in (".txt", ".md", ".json"):
-                try:
+            ext = file_path.suffix.lower()
+            try:
+                if ext in (".txt", ".md", ".json"):
                     content = file_path.read_text(encoding="utf-8")
+
+                elif ext == ".docx":
+                    # Extract plain text from Word documents
+                    try:
+                        from docx import Document as DocxDocument
+                        doc = DocxDocument(str(file_path))
+                        content = "\n".join(
+                            p.text for p in doc.paragraphs if p.text.strip()
+                        )
+                    except ImportError:
+                        logger.warning(
+                            "[KnowledgeBase] python-docx not installed — "
+                            f"skipping {file_path.name}. "
+                            "Install with: pip install python-docx"
+                        )
+                        continue
+
+                else:
+                    continue  # unsupported format
+
+                if content.strip():
                     self._cache[file_path.name] = content
                     logger.info(
                         f"[KnowledgeBase] Loaded: {file_path.name} "
                         f"({len(content)} chars)"
                     )
-                except Exception as exc:
+                else:
                     logger.warning(
-                        f"[KnowledgeBase] Failed to read {file_path.name}: {exc}"
+                        f"[KnowledgeBase] Empty file skipped: {file_path.name}"
                     )
+
+            except Exception as exc:
+                logger.warning(
+                    f"[KnowledgeBase] Failed to read {file_path.name}: {exc}"
+                )
 
         logger.info(
             f"[KnowledgeBase] Total files loaded: {len(self._cache)}"

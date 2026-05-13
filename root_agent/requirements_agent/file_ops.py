@@ -10,7 +10,7 @@ import shutil
 import datetime
 from pathlib import Path
 
-from logger import get_logger
+from requirements_agent.logger import get_logger
 
 logger = get_logger(__name__)
 

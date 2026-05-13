@@ -22,8 +22,8 @@ from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import ConnectionFailure, OperationFailure, PyMongoError
 
-from config import config
-from logger import get_logger
+from .config import config
+from .logger import get_logger
 
 logger = get_logger(__name__)
 

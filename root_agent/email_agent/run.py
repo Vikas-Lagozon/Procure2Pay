@@ -1,27 +1,40 @@
 #!/usr/bin/env python3
-# run.py
-# Entry point for the Jarvis Email Agent.
-# Runs an interactive CLI loop with full session persistence.
+# run.py — Email Agent
+# ─────────────────────────────────────────────────────────────
+# Works in TWO modes:
+#   1. Standalone : python run.py            (from email_agent/)
+#                   python email_agent/run.py (from root_agent/)
+#   2. As package : imported by root_agent/chatbot.py
 #
-# Usage:
-#   python run.py                    # interactive mode
-#   python run.py --once "your cmd" # single-shot mode (scripting)
-#   python run.py --session my_id   # resume a named session
-
-from __future__ import annotations
+# Strategy: insert root_agent/ into sys.path so email_agent is
+# always imported as a package — consistent in both modes.
+# ─────────────────────────────────────────────────────────────
 
 import argparse
 import asyncio
 import sys
 import uuid
+from pathlib import Path
 from datetime import datetime
 
-from logger import get_logger
-from agent import chat_stream, chat, get_or_create_session, USER_ID
+# ── Ensure root_agent/ is on sys.path so `email_agent.*` resolves ──
+_ROOT = Path(__file__).resolve().parent.parent   # → root_agent/
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from google.genai import types
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+
+from email_agent.agent import email_agent
+from email_agent.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── ANSI colour codes (disabled on non-TTY) ───────────────────
+APP_NAME = "email_app"
+USER_ID  = "user_001"
+
+# ── ANSI colour codes ───────────────────────────────────────
 _IS_TTY = sys.stdout.isatty()
 
 CYAN   = "\033[96m"  if _IS_TTY else ""
@@ -34,178 +47,138 @@ RESET  = "\033[0m"   if _IS_TTY else ""
 BANNER = f"""
 {BOLD}{CYAN}
 ╔══════════════════════════════════════════════════════════════╗
-║          J A R V I S  —  Email Automation Agent             ║
+║          E M A I L  A G E N T  —  Email Automation Agent     ║
 ║          Lagozon Technology Pvt. Ltd.                        ║
 ╚══════════════════════════════════════════════════════════════╝
 {RESET}
 {YELLOW}Type your email instruction in plain English.{RESET}
-{YELLOW}Examples:{RESET}
-  • Send a proposal to john@acme.com
-  • Show my unread emails
-  • Reply to thread <thread_id> saying delivery confirmed by Friday
-  • Download all invoice attachments from last week
-  • Attach /path/to/report.pdf to an email for alice@corp.com
+"""
 
-{YELLOW}Commands:{RESET}
-  {BOLD}exit{RESET} / {BOLD}quit{RESET}   — End the session
-  {BOLD}session{RESET}        — Show current session ID
-  {BOLD}clear{RESET}          — Clear terminal (history preserved)
-  {BOLD}help{RESET}           — Show this help
+HELP_TEXT = """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ Email Agent — Commands
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+NATURAL LANGUAGE (Recommended)
+  Send a proposal to john@acme.com
+  Show my unread emails
+  Reply to thread <thread_id> saying "Approved"
+  Download all attachments from last week
+
+SPECIAL COMMANDS
+  /help           — Show this help
+  /session        — Show current session ID
+  /clear          — Clear terminal screen
+  exit / quit     — End session
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 
-# ─────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────
+async def send_message(runner: Runner, session_id: str, text: str):
+    """Send a message to the agent and print the response."""
+    async for event in runner.run_async(
+        user_id=USER_ID,
+        session_id=session_id,
+        new_message=types.Content(
+            role="user",
+            parts=[types.Part(text=text)],
+        ),
+    ):
+        if event.is_final_response() and event.content:
+            for part in event.content.parts:
+                if getattr(part, "text", None):
+                    print(f"\n{BOLD}{CYAN}Email Agent:{RESET} {part.text}")
 
-def _print_banner() -> None:
-    print(BANNER)
-
-
-def _print_user(text: str) -> None:
-    print(f"\n{BOLD}{GREEN}You:{RESET} {text}")
-
-
-def _print_jarvis_start() -> None:
-    print(f"\n{BOLD}{CYAN}Jarvis:{RESET} ", end="", flush=True)
-
-
-def _print_chunk(chunk: str) -> None:
-    print(chunk, end="", flush=True)
-
-
-def _print_newline() -> None:
-    print()
-
-
-def _print_error(msg: str) -> None:
-    print(f"\n{RED}[Error] {msg}{RESET}")
-
-
-def _print_info(msg: str) -> None:
-    print(f"{YELLOW}{msg}{RESET}")
-
-
-def _show_help() -> None:
-    _print_banner()
-
-
-async def _stream_response(user_input: str, session_id: str) -> None:
-    """Stream Jarvis's response to stdout."""
-    _print_jarvis_start()
-    has_output = False
-    try:
-        async for chunk in chat_stream(user_input, session_id):
-            _print_chunk(chunk)
-            has_output = True
-    except Exception as exc:
-        _print_error(f"Agent error: {exc}")
-        logger.error(f"[run] Agent error: {exc}", exc_info=True)
-    finally:
-        if not has_output:
-            print(f"{YELLOW}(No response from agent.){RESET}", end="")
-        _print_newline()
-
-
-# ─────────────────────────────────────────────────────────────
-# INTERACTIVE LOOP
-# ─────────────────────────────────────────────────────────────
 
 async def interactive_loop(session_id: str) -> None:
-    """
-    Run an interactive REPL for the Jarvis email agent.
+    session_service = InMemorySessionService()
 
-    Maintains conversation history within the ADK InMemorySessionService
-    for the duration of the process. Each session_id is a separate
-    conversation context.
-    """
-    _print_banner()
-    _print_info(f"Session ID: {session_id}")
-    _print_info(f"Started   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    # Create session once upfront
+    await session_service.create_session(
+        app_name=APP_NAME,
+        user_id=USER_ID,
+        session_id=session_id,
+    )
 
-    await get_or_create_session(USER_ID, session_id)
+    runner = Runner(
+        agent=email_agent,
+        app_name=APP_NAME,
+        session_service=session_service,
+    )
+
+    print("=" * 60)
+    print("               EMAIL AGENT")
+    print("=" * 60)
+    print(BANNER)
+    print(HELP_TEXT)
+    print(f"Session ID: {session_id}\n")
 
     while True:
         try:
             user_input = input(f"{BOLD}You:{RESET} ").strip()
         except (EOFError, KeyboardInterrupt):
-            _print_info("\n\nSession ended. Goodbye!")
+            print(f"\n\n{RED}Session ended. Goodbye!{RESET}")
             break
 
         if not user_input:
             continue
 
-        command = user_input.lower()
+        lower = user_input.lower()
 
-        if command in ("exit", "quit", "bye"):
-            _print_info("\nGoodbye! Session closed.")
+        if lower in ("exit", "quit", "bye"):
+            print(f"\n{YELLOW}Goodbye!{RESET}")
             break
 
-        if command == "session":
-            _print_info(f"Current session ID: {session_id}")
+        elif lower == "/help":
+            print(HELP_TEXT)
             continue
 
-        if command == "clear":
+        elif lower == "/session":
+            print(f"{YELLOW}Current Session ID: {session_id}{RESET}")
+            continue
+
+        elif lower == "/clear":
             print("\033[2J\033[H" if _IS_TTY else "")
-            _print_banner()
+            print(BANNER)
             continue
 
-        if command == "help":
-            _show_help()
-            continue
-
-        _print_user(user_input)
-        await _stream_response(user_input, session_id)
-
-
-# ─────────────────────────────────────────────────────────────
-# SINGLE-SHOT MODE
-# ─────────────────────────────────────────────────────────────
+        await send_message(runner, session_id, user_input)
+        
 
 async def single_shot(command: str, session_id: str) -> None:
-    """
-    Execute a single command and print the full response.
-    Useful for scripting and CI pipelines.
-    """
-    logger.info(f"[run] Single-shot | command={command!r} | session={session_id}")
-    await get_or_create_session(USER_ID, session_id)
-    response = await chat(command, session_id)
-    print(response)
+    session_service = InMemorySessionService()
+
+    # Create session once upfront
+    await session_service.create_session(
+        app_name=APP_NAME,
+        user_id=USER_ID,
+        session_id=session_id,
+    )
+
+    runner = Runner(
+        agent=email_agent,
+        app_name=APP_NAME,
+        session_service=session_service,
+    )
+    await send_message(runner, session_id, command)
 
 
-# ─────────────────────────────────────────────────────────────
-# ARGUMENT PARSER
-# ─────────────────────────────────────────────────────────────
-
-def _parse_args() -> argparse.Namespace:
+def _parse_args():
     parser = argparse.ArgumentParser(
-        prog        = "jarvis",
-        description = "Jarvis — Natural Language Email Agent (Lagozon Technology)",
+        prog="email_agent",
+        description="Email Agent — Natural Language Email Agent"
     )
-    parser.add_argument(
-        "--session",
-        metavar = "SESSION_ID",
-        default = "",
-        help    = "Resume or start a named session (default: auto-generated UUID).",
-    )
-    parser.add_argument(
-        "--once",
-        metavar = "COMMAND",
-        default = "",
-        help    = "Execute a single command and exit (non-interactive mode).",
-    )
+    parser.add_argument("--session", default="", help="Session ID")
+    parser.add_argument("--once", default="", help="Single command mode")
     return parser.parse_args()
 
 
-# ─────────────────────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────────────────────
-
-async def main() -> None:
-    args       = _parse_args()
+async def main():
+    args = _parse_args()
     session_id = args.session or str(uuid.uuid4())
 
-    logger.info(f"[run] Starting Jarvis | session={session_id}")
+    logger.info(f"Starting Email Agent | session={session_id}")
 
     if args.once:
         await single_shot(args.once, session_id)

@@ -4,9 +4,16 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
-
 from dotenv import load_dotenv
+
+# ─────────────────────────────────────────────────────────────
+_AGENT_DIR = Path(__file__).resolve().parent
+_ROOT_DIR  = _AGENT_DIR.parent
+for _p in (_AGENT_DIR, _ROOT_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 load_dotenv()
 
@@ -64,8 +71,6 @@ class Config:
     ]
 
     # Combined OAuth2 scopes used for the single shared token file.
-    # NOTE: If you had a token.json from before contacts support was added,
-    # delete it and re-run to trigger a fresh browser auth flow.
     ALL_OAUTH_SCOPES: list[str] = GMAIL_SCOPES + CONTACTS_SCOPES
 
     # ── Email Defaults ────────────────────────────────────────

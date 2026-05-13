@@ -6,4 +6,9 @@ __*
 logs/
 documents/
 venv/
+dotenv.env
+VENDORS
+REQUIREMENTS
+QUOTATIONS
+*ATTACHMENTS*
 

@@ -1,54 +1,33 @@
-# run.py
+# requirements_agent/run.py
+
+import sys
 import asyncio
+from pathlib import Path
+
+# ── Ensure both the agent dir and root dir are on sys.path ──────────────────
+_AGENT_DIR = Path(__file__).resolve().parent
+_ROOT_DIR  = _AGENT_DIR.parent
+for _p in (_AGENT_DIR, _ROOT_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+# ─────────────────────────────────────────────────────────────────────────────
+
 from google.genai import types
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 
-from agent import chatbot_agent
+from requirements_agent.agent import requirements_agent
+from requirements_agent.prompts import HELP_TEXT
 
 APP_NAME = "requirements_chatbot_app"
 USER_ID  = "user_001"
 
-HELP_TEXT = """
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- Requirements Chatbot — Commands
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-UPLOAD  (file is stored in REQUIREMENTS/ with a timestamp prefix)
-  <file_path>                      Type or paste the file path directly
-  /upload <file_path>              Alternatively, use the /upload prefix
-  Supported formats: .docx, .pdf, .txt, .md
-  Example: /upload docs/requirements_v1.docx
-
-READ
-  /list                            List all records in the database
-  /get <record_id>                 Show full details of one record
-
-DELETE  (removes DB record + stored file — asks for confirmation)
-  /delete <record_id>
-
-UPDATE  (replaces stored file, re-extracts text, updates DB record)
-  /update <record_id> <new_file_path>
-  Example: /update 6642abc123 docs/requirements_v2.docx
-
-NATURAL LANGUAGE Q&A  (works even without uploading in this session)
-  Ask anything in plain English — documents are loaded from the database
-  automatically. Examples:
-    Show me all technical requirements
-    List requirements related to home appliances
-    How many requirements are for electronics items?
-    How many units of laptops do we need, and in which requirements?
-    What is the ideal specification of all printer requirements?
-    Which department has the most requirements?
-
-MISC
-  /help                            Show this message
-  /exit                            Quit
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
+_DELETE_KEYWORDS = (
+    "delete", "remove", "erase", "drop", "wipe", "purge", "clear",
+)
 
 
-async def send_message(runner: Runner, session_id: str, text: str):
+async def send_message(runner: Runner, session_id: str, text: str) -> None:
     async for event in runner.run_async(
         user_id=USER_ID,
         session_id=session_id,
@@ -63,10 +42,10 @@ async def send_message(runner: Runner, session_id: str, text: str):
                     print(f"\nBot: {part.text}")
 
 
-async def main():
+async def main() -> None:
     session_service = InMemorySessionService()
     runner = Runner(
-        agent=chatbot_agent,
+        agent=requirements_agent,
         app_name=APP_NAME,
         session_service=session_service,
     )
@@ -75,9 +54,9 @@ async def main():
         user_id=USER_ID,
     )
 
-    print("=" * 50)
-    print("       Requirements Chatbot")
-    print("=" * 50)
+    print("=" * 52)
+    print("        Requirements Chatbot")
+    print("=" * 52)
     print(HELP_TEXT)
 
     while True:
@@ -92,58 +71,27 @@ async def main():
 
         lower = user_input.lower()
 
+        # ── Local commands handled before sending to agent ────
         if lower in ("/exit", "exit", "quit"):
             print("\nExiting chatbot. Goodbye!")
             break
 
-        elif lower == "/help":
+        if lower == "/help":
             print(HELP_TEXT)
+            continue
 
-        elif lower.startswith("/upload"):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) < 2 or not parts[1].strip():
-                print("\n  Usage: /upload <file_path>")
-                print("  Supported: .docx, .pdf, .txt, .md\n")
-                continue
-            await send_message(runner, session.id, parts[1].strip())
-
-        elif lower == "/list":
-            await send_message(runner, session.id, "/list")
-
-        elif lower.startswith("/get"):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) < 2:
-                print("\n  Usage: /get <record_id>\n")
-                continue
-            await send_message(runner, session.id, user_input)
-
-        elif lower.startswith("/delete"):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) < 2:
-                print("\n  Usage: /delete <record_id>\n")
-                continue
-            record_id = parts[1].strip()
+        # ── Delete confirmation guard ─────────────────────────
+        if any(kw in lower for kw in _DELETE_KEYWORDS):
             confirm = input(
-                f"\n  ⚠️  Permanently delete record '{record_id}' and its stored file?\n"
-                f"  This action cannot be undone. Confirm? (yes/no): "
+                "\n  ⚠️  This looks like a delete operation.\n"
+                "  Deletions are permanent and cannot be undone.\n"
+                "  Confirm? (yes/no): "
             ).strip().lower()
-            if confirm in ("yes", "y"):
-                await send_message(runner, session.id, user_input)
-            else:
-                print("  Deletion cancelled.")
-
-        elif lower.startswith("/update"):
-            parts = user_input.split(maxsplit=2)
-            if len(parts) < 3:
-                print(
-                    "\n  Usage: /update <record_id> <new_file_path>"
-                    "\n  Example: /update 6642abc123 docs/requirements_v2.docx\n"
-                )
+            if confirm not in ("yes", "y"):
+                print("  Deletion cancelled.\n")
                 continue
-            await send_message(runner, session.id, user_input)
 
-        else:
-            await send_message(runner, session.id, user_input)
+        await send_message(runner, session.id, user_input)
 
 
 if __name__ == "__main__":

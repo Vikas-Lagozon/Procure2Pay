@@ -1,22 +1,24 @@
 # chatbot.py
 # ─────────────────────────────────────────────────────────────
 # Jarvis — Procure-to-Pay Root Agent
-#
-# Sub-agents:
-#   requirements_sub_agent  — requirement document CRUD + Q&A
-#   vendors_sub_agent       — vendor document CRUD + Q&A
-#
-# Tools (imported from tools.py):
-#   list_all_requirements, list_all_vendors,
-#   get_requirement_details, get_vendor_details,
-#   get_requirement_and_all_vendors, get_vendor_and_all_requirements,
-#   get_all_requirements_and_all_vendors,
-#   save_match_result_to_db, save_match_result_to_docx
 # ─────────────────────────────────────────────────────────────
 
 import os
 import sys
 import certifi
+from pathlib import Path
+
+# ── Ensure root_agent/ is always on sys.path ────────────────────────────────
+_ROOT = Path(__file__).resolve().parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+from config import config
+from logger import get_logger
+from prompt import SYSTEM_INSTRUCTION
+# ─────────────────────────────────────────────────────────────────────────────
 
 from google.adk.agents import LlmAgent
 from google.adk.apps import App
@@ -24,14 +26,11 @@ from google.adk.sessions import DatabaseSessionService
 from google.adk import Runner
 import google.genai.types as types
 
-from config import config
-from logger import get_logger
-
-from requirements_agent.subagent import requirements_sub_agent
-from vendors_agent.subagent import vendors_sub_agent
-
-from prompt import SYSTEM_INSTRUCTION
-from tools import TOOLS
+# ── Sub-agents (imported AFTER root modules to prevent sys.path pollution) ───
+from requirements_agent.agent import requirements_agent
+from vendors_agent.agent import vendors_agent
+from email_agent.agent import email_agent
+# ─────────────────────────────────────────────────────────────────────────────
 
 logger = get_logger(__name__)
 
@@ -59,10 +58,10 @@ root_agent = LlmAgent(
     name        = "jarvis_root_agent",
     model       = MODEL,
     instruction = SYSTEM_INSTRUCTION,
-    tools       = TOOLS,
     sub_agents  = [
-        requirements_sub_agent,
-        vendors_sub_agent,
+        requirements_agent,
+        vendors_agent,
+        email_agent,
     ],
 )
 
@@ -178,4 +177,3 @@ async def chat_stream(user_input: str, session_id: str):
                     f"length={len(part.text)}"
                 )
                 yield part.text
-
